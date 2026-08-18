@@ -31,7 +31,7 @@ extern "C" {
 // are cached on it rather than baked into the image: an image carrying them re-downloads
 // several gigabytes into every cold worker, and the volume is written once and read by all of
 // them. Overridden by ST_WEIGHTS_DIR for a machine that is not a RunPod worker.
-#define ST_WEIGHTS_DIR_DEFAULT "/runpod-volume/see-through/weights"
+#define ST_WEIGHTS_DIR_DEFAULT "/runpod-volume/see-through/hf"
 
 // Parses one command line into a request. Returns 0 on success; on refusal writes the reason
 // into `error` and returns non-zero. `line` is borrowed; `req`'s strings point into `store`,

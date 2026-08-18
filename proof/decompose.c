@@ -46,8 +46,25 @@ static int rec_decompose(void *ctx, const st_request_t *req, st_result_t *out) {
 
 static void rec_close(void *ctx) { (void)ctx; }
 
+// `{:error, ...}` is a 2-array whose head is tag 39 "error". Checking the head is enough to
+// tell a refusal from an answer; the reason itself is checked by name below.
 static int is_error(const unsigned char *r, size_t n) {
-	return n > 7 && r[0] == 0xa1 && memcmp(r + 2, "error", 5) == 0;
+	return n > 9 && r[0] == 0x82 && r[1] == 0xd8 && r[2] == 39 && r[3] == 0x65 &&
+			memcmp(r + 4, "error", 5) == 0;
+}
+
+// A reason appears as tag 39 followed by its name, so finding the tagged name is finding the
+// reason. Written out rather than decoded because this proof asserts on bytes; the term itself
+// is checked by a real virtual machine in proof/elixir_compat.exs.
+static int has_atom(const unsigned char *r, size_t n, const char *name) {
+	const size_t len = strlen(name);
+	for (size_t i = 0; i + 3 + len <= n; i++) {
+		if (r[i] == 0xd8 && r[i + 1] == 39 && r[i + 2] == (unsigned char)(0x60 | len) &&
+				memcmp(r + i + 3, name, len) == 0) {
+			return 1;
+		}
+	}
+	return 0;
 }
 
 // The refusal text, so a case can check which bound was hit rather than only that one was.
@@ -64,7 +81,7 @@ static int mentions(const unsigned char *r, size_t n, const char *needle) {
 int main(void) {
 	unsigned char reply[4096];
 	char store[2048];
-	char error[256];
+	st_refusal_t why;
 	st_request_t req;
 	int stop = 0;
 
@@ -76,40 +93,38 @@ int main(void) {
 	st.out_root = "/runpod-volume/see-through/out";
 	st.opened = 1;
 
-	check(st_parse("decompose /in.png --res 1280 --steps 30", &req, store, sizeof(store), error,
-				   sizeof(error)) == 0,
+	check(st_parse("decompose /in.png --res 1280 --steps 30", &req, store, sizeof(store), &why) == 0,
 			"the production settings parse");
 	check(req.res == 1280 && req.steps == 30 && strcmp(req.in_path, "/in.png") == 0,
 			"the path and both settings are read");
 
-	check(st_parse("decompose /in.png --res 512 --steps 30", &req, store, sizeof(store), error,
-				   sizeof(error)) != 0,
+	check(st_parse("decompose /in.png --res 512 --steps 30", &req, store, sizeof(store), &why) != 0,
 			"512px is refused");
-	check(strstr(error, "512") != NULL, "the refusal names the resolution it saw");
+	check(why.got == 512 && why.minimum == 1280 && strcmp(why.reason, "res_below_minimum") == 0,
+			"the refusal is :res_below_minimum and carries the numbers");
 
-	check(st_parse("decompose /in.png --res 1280 --steps 8", &req, store, sizeof(store), error,
-				   sizeof(error)) != 0,
+	check(st_parse("decompose /in.png --res 1280 --steps 8", &req, store, sizeof(store), &why) != 0,
 			"8 steps is refused");
-	check(strstr(error, "8") != NULL, "the refusal names the step count it saw");
+	check(why.got == 8 && why.minimum == 30 && strcmp(why.reason, "steps_below_minimum") == 0,
+			"the refusal is :steps_below_minimum and carries the numbers");
 
-	check(st_parse("decompose /in.png", &req, store, sizeof(store), error, sizeof(error)) != 0,
+	check(st_parse("decompose /in.png", &req, store, sizeof(store), &why) != 0,
 			"a command with no settings is refused, not defaulted");
-	check(st_parse("decompose --res 1280 --steps 30", &req, store, sizeof(store), error,
-				   sizeof(error)) != 0,
+	check(st_parse("decompose --res 1280 --steps 30", &req, store, sizeof(store), &why) != 0,
 			"a command with no input path is refused");
-	check(st_parse("decompose /in.png --res 1280 --steps", &req, store, sizeof(store), error,
-				   sizeof(error)) != 0,
+	check(st_parse("decompose /in.png --res 1280 --steps", &req, store, sizeof(store), &why) != 0,
 			"a flag with no value is refused as a missing argument");
-	check(strstr(error, "needs a value") != NULL, "and says so, rather than blaming the count");
-	check(st_parse("render /in.png --res 1280 --steps 30", &req, store, sizeof(store), error,
-				   sizeof(error)) != 0,
+	check(strcmp(why.reason, "missing_value") == 0 && why.flag && strcmp(why.flag, "steps") == 0,
+			"it is :missing_value and names the flag, not the count");
+	check(st_parse("render /in.png --res 1280 --steps 30", &req, store, sizeof(store), &why) != 0,
 			"another verb is refused");
 
 	{ // A refused command never reaches the engine, which is the whole point of the gate.
 		calls = 0;
 		const size_t n = st_ask(&st, "decompose /in.png --res 512 --steps 8", reply,
 				sizeof(reply), &stop);
-		check(is_error(reply, n), "a refusal is a CBOR error reply");
+		check(is_error(reply, n) && has_atom(reply, n, "res_below_minimum"),
+				"a refusal is {:error, {:res_below_minimum, _}}");
 		check(calls == 0, "a refused command never reaches the engine");
 	}
 
@@ -122,8 +137,9 @@ int main(void) {
 				"output defaults to the network volume");
 		check(!is_error(reply, n), "the reply is not an error");
 		check(mentions(reply, n, "res.psd.json"), "the reply names the sidecar");
-		check(mentions(reply, n, "sidecar") && mentions(reply, n, "layers"),
-				"the reply carries the keys a caller decodes");
+		check(n > 2 && reply[0] == 0x82 && has_atom(reply, n, "ok"), "a success is {:ok, map}");
+		check(has_atom(reply, n, "sidecar") && has_atom(reply, n, "layers"),
+				"every key is an atom, not a binary");
 	}
 
 	{ // With no engine loaded, every command is answered rather than dropped.
@@ -131,7 +147,8 @@ int main(void) {
 		none.opened = 0;
 		const size_t n = st_ask(&none, "decompose /in/a.png --res 1280 --steps 30", reply,
 				sizeof(reply), &stop);
-		check(is_error(reply, n), "a worker with no weights still answers its job");
+		check(is_error(reply, n) && has_atom(reply, n, "no_engine"),
+				"a worker with no weights answers {:error, :no_engine}");
 	}
 
 	printf("%s\n", failures ? "decompose: FAILED" : "decompose: all checks passed");

@@ -24,20 +24,35 @@ static char *take(const char *at, size_t n, char **store, char *store_end) {
 	return out;
 }
 
-static int fail(char *error, size_t cap, const char *fmt, ...) {
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(error, cap, fmt, ap);
-	va_end(ap);
+// A refusal names its reason and the numbers behind it. There is no message, because a caller
+// matches the atom and a sentence is the thing it cannot match.
+static int refuse(st_refusal_t *why, const char *reason) {
+	memset(why, 0, sizeof(*why));
+	why->reason = reason;
 	return 1;
 }
 
-int st_parse(const char *line, st_request_t *req, char *store, size_t store_cap, char *error,
-		size_t error_cap) {
+static int refuse_flag(st_refusal_t *why, const char *reason, const char *flag) {
+	refuse(why, reason);
+	why->flag = flag;
+	return 1;
+}
+
+static int refuse_bound(st_refusal_t *why, const char *reason, long long got, long long min) {
+	refuse(why, reason);
+	why->got = got;
+	why->minimum = min;
+	why->has_numbers = 1;
+	return 1;
+}
+
+int st_parse(const char *line, st_request_t *req, char *store, size_t store_cap,
+		st_refusal_t *why) {
 	char *sp = store;
 	char *send = store + store_cap;
 
 	memset(req, 0, sizeof(*req));
+	memset(why, 0, sizeof(*why));
 	req->res = 0;
 	req->steps = 0;
 
@@ -50,7 +65,9 @@ int st_parse(const char *line, st_request_t *req, char *store, size_t store_cap,
 		++at;
 	}
 	if ((size_t)(at - verb) != 9 || memcmp(verb, "decompose", 9) != 0) {
-		return fail(error, error_cap, "unknown command; this interactor answers `decompose`");
+		refuse(why, "unknown_command");
+		why->text = take(verb, (size_t)(at - verb), &sp, send);
+		return 1;
 	}
 
 	while (*at) {
@@ -81,7 +98,7 @@ int st_parse(const char *line, st_request_t *req, char *store, size_t store_cap,
 			}
 			const size_t val_n = (size_t)(at - val);
 			if (val_n == 0) {
-				return fail(error, error_cap, "--%.*s needs a value", (int)flag_n, flag);
+				return refuse_flag(why, "missing_value", take(flag, flag_n, &sp, send));
 			}
 			if (flag_n == 3 && memcmp(flag, "res", 3) == 0) {
 				req->res = atoi(val);
@@ -90,42 +107,71 @@ int st_parse(const char *line, st_request_t *req, char *store, size_t store_cap,
 			} else if (flag_n == 3 && memcmp(flag, "out", 3) == 0) {
 				req->out_dir = take(val, val_n, &sp, send);
 			} else {
-				return fail(error, error_cap, "unknown flag --%.*s", (int)flag_n, flag);
+				return refuse_flag(why, "unknown_flag", take(flag, flag_n, &sp, send));
 			}
 			continue;
 		}
 
 		if (req->in_path) {
-			return fail(error, error_cap, "decompose takes one input path");
+			return refuse(why, "too_many_input_paths");
 		}
 		req->in_path = take(tok, n, &sp, send);
 		if (!req->in_path) {
-			return fail(error, error_cap, "input path too long");
+			return refuse(why, "too_many_input_paths");
 		}
 	}
 
 	if (!req->in_path) {
-		return fail(error, error_cap, "decompose needs an input path");
+		return refuse(why, "missing_input_path");
 	}
 	// The gate. Both bounds are refused with the number that was asked for, because a refusal
 	// that does not say what it saw is one the caller retries unchanged.
 	if (req->res < ST_MIN_RES) {
-		return fail(error, error_cap,
-				"--res %d is below the production setting %d; a smaller run is not evidence",
-				req->res, ST_MIN_RES);
+		return refuse_bound(why, "res_below_minimum", req->res, ST_MIN_RES);
 	}
 	if (req->steps < ST_MIN_STEPS) {
-		return fail(error, error_cap,
-				"--steps %d is below the production setting %d; a smaller run is not evidence",
-				req->steps, ST_MIN_STEPS);
+		return refuse_bound(why, "steps_below_minimum", req->steps, ST_MIN_STEPS);
 	}
 	return 0;
 }
 
-static size_t error_reply(unsigned char *reply, size_t cap, const char *text) {
+// `{:error, :reason}` when there is nothing to add, and `{:error, {:reason, %{...}}}` when the
+// reason has numbers behind it. What a caller matches is the atom either way.
+static size_t refusal_reply(unsigned char *reply, size_t cap, const st_refusal_t *why) {
 	weft_cbor_t c = weft_cbor_to(reply, cap);
-	weft_cbor_map(&c, 1);
-	weft_cbor_kv_text(&c, "error", text);
+	unsigned pairs = 0;
+	if (why->has_numbers) {
+		pairs = 2;
+	} else if (why->flag) {
+		pairs = 1;
+	} else if (why->text) {
+		pairs = 1;
+	}
+
+	if (pairs == 0) {
+		weft_cbor_error(&c, why->reason);
+		return c.n;
+	}
+
+	weft_cbor_error_detail(&c, why->reason, pairs);
+	if (why->has_numbers) {
+		weft_cbor_atom(&c, "got");
+		weft_cbor_int(&c, why->got);
+		weft_cbor_atom(&c, "minimum");
+		weft_cbor_int(&c, why->minimum);
+	} else if (why->flag) {
+		weft_cbor_atom(&c, "flag");
+		weft_cbor_text(&c, why->flag);
+	} else {
+		weft_cbor_atom(&c, "verb");
+		weft_cbor_text(&c, why->text);
+	}
+	return c.n;
+}
+
+static size_t bare_error(unsigned char *reply, size_t cap, const char *reason) {
+	weft_cbor_t c = weft_cbor_to(reply, cap);
+	weft_cbor_error(&c, reason);
 	return c.n;
 }
 
@@ -134,34 +180,47 @@ size_t st_ask(void *ctx, const char *command, unsigned char *reply, size_t cap, 
 	(void)stop;
 
 	char store[2048];
-	char error[256];
+	st_refusal_t why;
 	st_request_t req;
 
-	if (st_parse(command, &req, store, sizeof(store), error, sizeof(error)) != 0) {
-		return error_reply(reply, cap, error);
+	if (st_parse(command, &req, store, sizeof(store), &why) != 0) {
+		return refusal_reply(reply, cap, &why);
 	}
 	if (!req.out_dir) {
 		req.out_dir = st->out_root;
 	}
 	if (!st->opened) {
-		return error_reply(reply, cap, "no engine: the weights were never loaded");
+		return bare_error(reply, cap, "no_engine");
 	}
 
 	st_result_t res;
 	memset(&res, 0, sizeof(res));
 	if (st->engine.decompose(st->engine.ctx, &req, &res) != 0) {
-		return error_reply(reply, cap, res.error[0] ? res.error : "decompose failed");
+		// The engine's own message is a person's to read, so it goes under :detail where no
+		// program looks. What a caller matches on is the atom.
+		weft_cbor_t c = weft_cbor_to(reply, cap);
+		weft_cbor_error_detail(&c, "decompose_failed", 1);
+		weft_cbor_atom(&c, "detail");
+		weft_cbor_text(&c, res.error[0] ? res.error : "");
+		return c.n;
 	}
 
 	// What the caller gets: where the layers are, how many, and how long the engine says it
 	// took. Not the pixels -- the bus carries at most one value and a layer set is larger than
 	// that, so the artefacts stay on the volume and this reply says where.
+	// `{:ok, %{...}}`, and every key an atom, so a caller matches %{layers: n} rather than
+	// reaching into a map with binary keys.
 	weft_cbor_t c = weft_cbor_to(reply, cap);
-	weft_cbor_map(&c, 5);
-	weft_cbor_kv_text(&c, "in", req.in_path);
-	weft_cbor_kv_text(&c, "out", req.out_dir);
-	weft_cbor_kv_text(&c, "sidecar", res.sidecar);
-	weft_cbor_kv_int(&c, "layers", res.layers);
-	weft_cbor_kv_int(&c, "ms", res.ms);
+	weft_cbor_ok_map(&c, 5);
+	weft_cbor_atom(&c, "in");
+	weft_cbor_text(&c, req.in_path);
+	weft_cbor_atom(&c, "out");
+	weft_cbor_text(&c, req.out_dir);
+	weft_cbor_atom(&c, "sidecar");
+	weft_cbor_text(&c, res.sidecar);
+	weft_cbor_atom(&c, "layers");
+	weft_cbor_int(&c, res.layers);
+	weft_cbor_atom(&c, "ms");
+	weft_cbor_int(&c, res.ms);
 	return c.n;
 }

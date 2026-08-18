@@ -72,3 +72,28 @@ void weft_cbor_kv_bool(weft_cbor_t *c, const char *k, int v) {
 	weft_cbor_text(c, k);
 	weft_cbor_bool(c, v);
 }
+
+void weft_cbor_atom(weft_cbor_t *c, const char *name) {
+	weft_cbor_head(c, 6, WEFT_CBOR_TAG_IDENTIFIER);
+	weft_cbor_text(c, name);
+}
+
+void weft_cbor_error(weft_cbor_t *c, const char *reason) {
+	weft_cbor_array(c, 2); // a tuple
+	weft_cbor_atom(c, "error");
+	weft_cbor_atom(c, reason);
+}
+
+void weft_cbor_error_detail(weft_cbor_t *c, const char *reason, uint64_t pairs) {
+	weft_cbor_array(c, 2);
+	weft_cbor_atom(c, "error");
+	weft_cbor_array(c, 2); // the inner {reason, detail} tuple
+	weft_cbor_atom(c, reason);
+	weft_cbor_map(c, pairs);
+}
+
+void weft_cbor_ok_map(weft_cbor_t *c, uint64_t pairs) {
+	weft_cbor_array(c, 2);
+	weft_cbor_atom(c, "ok");
+	weft_cbor_map(c, pairs);
+}

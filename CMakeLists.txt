@@ -27,3 +27,10 @@ add_executable(seethrough-decompose proof/decompose.c)
 target_link_libraries(seethrough-decompose PRIVATE seethrough)
 target_compile_options(seethrough-decompose PRIVATE -Wall -Wextra)
 add_test(NAME decompose COMMAND seethrough-decompose)
+
+# Writes the replies a real virtual machine then decodes. The C proof asserts on bytes; whether
+# those bytes are the term an Elixir caller matches is a question only Erlang answers, and
+# proof/elixir_compat.exs asks it against the same decoder the Python half is checked with.
+add_executable(seethrough-write-replies proof/write_replies.c)
+target_link_libraries(seethrough-write-replies PRIVATE seethrough)
+target_compile_options(seethrough-write-replies PRIVATE -Wall -Wextra)

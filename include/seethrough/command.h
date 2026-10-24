@@ -35,7 +35,7 @@ extern "C" {
 
 // Every reason this interactor may send, and the whole list.
 //
-// RFD 0124: a reason is an atom, never a sentence, because a caller selects a branch on the
+// RFD66606-0124: a reason is an atom, never a sentence, because a caller selects a branch on the
 // atom and no caller can match prose. This list is the same list `interactor-see-through-python`
 // keeps in `seethrough/reply.py`, and `proof/test_agreement.py` fails when the two differ --
 // two implementations reporting different reasons for the same refusal are not answering the
